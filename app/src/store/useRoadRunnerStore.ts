@@ -1,5 +1,8 @@
 import { create } from 'zustand'
-import type { RoadmapItem, Group, Category, Persona, FilterState, MappingConfig, SavedView } from '../types'
+import type {
+  RoadmapItem, Group, Category, Persona, FilterState, MappingConfig, SavedView,
+  Integration, IntegrationStatus, LinearCredentials, JiraCredentials, JiraMappingConfig,
+} from '../types'
 import { MOCK_ITEMS, MOCK_GROUPS, MOCK_CATEGORIES, MOCK_PERSONAS } from '../data/mockData'
 import { applyFilters } from '../utils/filterEngine'
 import { loadData } from '../services/dataService'
@@ -26,6 +29,7 @@ interface RoadRunnerStore {
   // UI state
   timelineView: 'quarterly' | 'annual'
   density: 'expanded' | 'condensed'
+  theme: 'dark' | 'light'
   filters: FilterState
   selectedItemId: string | null
   isFilterDrawerOpen: boolean
@@ -34,9 +38,17 @@ interface RoadRunnerStore {
   // Data source
   dataSource: 'linear' | 'demo'
   mappingConfig: MappingConfig
+  jiraMappingConfig: JiraMappingConfig
   isLoading: boolean
   lastSyncedAt: string | null
   error: string | null
+
+  // Integration / auth
+  integration: Integration
+  integrationStatus: IntegrationStatus
+  integrationError: string | null
+  linearCredentials: LinearCredentials | null
+  jiraCredentials: JiraCredentials | null
 
   // Saved views
   savedViews: SavedView[]
@@ -48,6 +60,7 @@ interface RoadRunnerStore {
   // Actions
   setTimelineView: (view: 'quarterly' | 'annual') => void
   setDensity: (density: 'expanded' | 'condensed') => void
+  setTheme: (theme: 'dark' | 'light') => void
   setFilters: (filters: Partial<FilterState>) => void
   clearFilters: () => void
   selectItem: (id: string | null) => void
@@ -55,6 +68,10 @@ interface RoadRunnerStore {
   toggleSettings: () => void
   setDataSource: (source: 'linear' | 'demo') => void
   setMappingConfig: (config: Partial<MappingConfig>) => void
+  setJiraMappingConfig: (config: Partial<JiraMappingConfig>) => void
+  connectLinear: (apiKey: string) => Promise<void>
+  connectJira: (domain: string, email: string, apiToken: string) => Promise<void>
+  disconnectIntegration: () => void
   syncData: () => Promise<void>
   saveView: (name: string, description?: string) => void
   loadView: (id: string) => void
@@ -69,6 +86,7 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
 
   timelineView: 'quarterly',
   density: 'expanded',
+  theme: (localStorage.getItem('rr-theme') as 'dark' | 'light') ?? 'dark',
   filters: DEFAULT_FILTERS,
   selectedItemId: null,
   isFilterDrawerOpen: false,
@@ -76,9 +94,18 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
 
   dataSource: 'demo',
   mappingConfig: { groupBy: 'project', categorySource: 'label', timeSource: 'dueDate', teamFilter: null, showIdentifier: false, showAssignee: false, showTeam: false },
+  jiraMappingConfig: { groupBy: 'epic', categorySource: 'label', timeSource: 'dueDate', showKey: false, showAssignee: false, showSprint: false, showStoryPoints: false },
   isLoading: false,
   lastSyncedAt: null,
   error: null,
+
+  integration: localStorage.getItem('rr-integration') as Integration ?? null,
+  integrationStatus: localStorage.getItem('rr-session') ? 'connected' : 'idle',
+  integrationError: null,
+  linearCredentials: localStorage.getItem('rr-integration') === 'linear' ? { apiKey: '••••••••' } : null,
+  jiraCredentials: localStorage.getItem('rr-integration') === 'jira'
+    ? { domain: '', email: '', apiToken: '••••••••' }
+    : null,
 
   savedViews: [],
   currentViewId: null,
@@ -89,6 +116,15 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
 
   setTimelineView: (view) => set({ timelineView: view }),
   setDensity: (density) => set({ density }),
+  setTheme: (theme) => {
+    localStorage.setItem('rr-theme', theme)
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark')
+    } else {
+      document.documentElement.classList.remove('dark')
+    }
+    set({ theme })
+  },
 
   setFilters: (partial) =>
     set((state) => ({ filters: { ...state.filters, ...partial } })),
@@ -110,6 +146,62 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
 
   setMappingConfig: (config) =>
     set((state) => ({ mappingConfig: { ...state.mappingConfig, ...config } })),
+
+  setJiraMappingConfig: (config) =>
+    set((state) => ({ jiraMappingConfig: { ...state.jiraMappingConfig, ...config } })),
+
+  connectLinear: async (apiKey) => {
+    set({ integrationStatus: 'connecting', integrationError: null })
+    try {
+      const res = await fetch('/api/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ integration: 'linear', linearKey: apiKey }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error ?? `Server error ${res.status}`)
+      }
+      const { sessionId } = await res.json()
+      localStorage.setItem('rr-session', sessionId)
+      localStorage.setItem('rr-integration', 'linear')
+      set({ integration: 'linear', integrationStatus: 'connected', integrationError: null, linearCredentials: { apiKey: '••••••••' }, dataSource: 'linear' })
+      await get().syncData()
+    } catch (err) {
+      set({ integrationStatus: 'error', integrationError: err instanceof Error ? err.message : 'Failed to save credentials' })
+    }
+  },
+
+  connectJira: async (domain, email, apiToken) => {
+    set({ integrationStatus: 'connecting', integrationError: null })
+    try {
+      const normalizedDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const res = await fetch('/api/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ integration: 'jira', jiraDomain: normalizedDomain, jiraEmail: email, jiraToken: apiToken }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error ?? `Server error ${res.status}`)
+      }
+      const { sessionId } = await res.json()
+      localStorage.setItem('rr-session', sessionId)
+      localStorage.setItem('rr-integration', 'jira')
+      set({ integration: 'jira', integrationStatus: 'connected', integrationError: null, jiraCredentials: { domain: normalizedDomain, email, apiToken: '••••••••' } })
+    } catch (err) {
+      set({ integrationStatus: 'error', integrationError: err instanceof Error ? err.message : 'Failed to save credentials' })
+    }
+  },
+
+  disconnectIntegration: () => {
+    const sessionId = localStorage.getItem('rr-session')
+    if (sessionId) {
+      fetch('/api/credentials', { method: 'DELETE', headers: { 'X-RR-Session': sessionId } }).catch(() => {})
+    }
+    ['rr-session', 'rr-integration'].forEach((k) => localStorage.removeItem(k))
+    set({ integration: null, integrationStatus: 'idle', integrationError: null, linearCredentials: null, jiraCredentials: null, dataSource: 'demo' })
+  },
 
   syncData: async () => {
     const { dataSource, mappingConfig } = get()

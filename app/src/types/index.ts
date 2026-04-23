@@ -1,5 +1,27 @@
 export type ItemStatus = 'backlog' | 'todo' | 'in-progress' | 'in-review' | 'done' | 'canceled'
 export type Priority = 'none' | 'urgent' | 'high' | 'medium' | 'low'
+export type Integration = 'linear' | 'jira' | null
+export type IntegrationStatus = 'idle' | 'connecting' | 'connected' | 'error'
+
+export interface LinearCredentials {
+  apiKey: string
+}
+
+export interface JiraCredentials {
+  domain: string
+  email: string
+  apiToken: string
+}
+
+export interface JiraMappingConfig {
+  groupBy: 'epic' | 'project' | 'label' | 'assignee'
+  categorySource: 'label' | 'component' | 'none'
+  timeSource: 'dueDate' | 'createdAt' | 'updatedAt' | 'sprintEnd'
+  showKey: boolean
+  showAssignee: boolean
+  showSprint: boolean
+  showStoryPoints: boolean
+}
 
 export interface RoadmapItem {
   id: string

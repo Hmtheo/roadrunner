@@ -1,20 +1,19 @@
 import type { RoadmapItem, Group, Category, ItemStatus, Priority, MappingConfig } from '../types'
 import { deriveTimePeriod } from '../utils/timePeriod'
 
-const LINEAR_API = 'https://api.linear.app/graphql'
-const API_KEY = import.meta.env.VITE_LINEAR_API_KEY as string
-
 async function gql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-  const res = await fetch(LINEAR_API, {
+  const sessionId = localStorage.getItem('rr-session') ?? ''
+  const res = await fetch('/api/linear', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: API_KEY,
-    },
+    headers: { 'Content-Type': 'application/json', 'X-RR-Session': sessionId },
     body: JSON.stringify({ query, variables }),
   })
 
-  if (!res.ok) throw new Error(`Linear API error: ${res.status}`)
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    const detail = body?.errors?.[0]?.message ?? body?.error ?? ''
+    throw new Error(`Linear API error: ${res.status}${detail ? ` — ${detail}` : ''}`)
+  }
 
   const json = await res.json()
   if (json.errors) throw new Error(json.errors[0]?.message ?? 'GraphQL error')
