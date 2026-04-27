@@ -14,6 +14,7 @@ export interface JiraCredentials {
 }
 
 export interface JiraMappingConfig {
+  productArea: string | null
   groupBy: 'epic' | 'project' | 'label' | 'assignee'
   categorySource: 'label' | 'component' | 'none'
   timeSource: 'dueDate' | 'createdAt' | 'updatedAt' | 'sprintEnd'

@@ -1,10 +1,18 @@
-import type { MappingConfig } from '../types'
+import type { MappingConfig, JiraMappingConfig } from '../types'
 import { fetchLinearData, type LinearData } from './linearAdapter'
+import { fetchJiraData, type JiraData } from './jiraAdapter'
 import { MOCK_ITEMS, MOCK_GROUPS, MOCK_CATEGORIES } from '../data/mockData'
 
-export async function loadData(source: 'linear' | 'demo', config: MappingConfig): Promise<LinearData> {
+export async function loadData(
+  source: 'linear' | 'jira' | 'demo',
+  config: MappingConfig | JiraMappingConfig
+): Promise<LinearData | JiraData> {
   if (source === 'linear') {
-    return fetchLinearData(config)
+    return fetchLinearData(config as MappingConfig)
+  }
+
+  if (source === 'jira') {
+    return fetchJiraData(config as JiraMappingConfig)
   }
 
   return {
