@@ -94,7 +94,7 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
 
   dataSource: 'demo',
   mappingConfig: { groupBy: 'project', categorySource: 'label', timeSource: 'dueDate', teamFilter: null, showIdentifier: false, showAssignee: false, showTeam: false },
-  jiraMappingConfig: { groupBy: 'epic', categorySource: 'label', timeSource: 'dueDate', showKey: false, showAssignee: false, showSprint: false, showStoryPoints: false },
+  jiraMappingConfig: { productArea: 'DTP', groupBy: 'epic', categorySource: 'label', timeSource: 'dueDate', showKey: false, showAssignee: false, showSprint: false, showStoryPoints: false },
   isLoading: false,
   lastSyncedAt: null,
   error: null,
@@ -189,6 +189,7 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
       localStorage.setItem('rr-session', sessionId)
       localStorage.setItem('rr-integration', 'jira')
       set({ integration: 'jira', integrationStatus: 'connected', integrationError: null, jiraCredentials: { domain: normalizedDomain, email, apiToken: '••••••••' } })
+      // Don't auto-sync - wait for user to select product area
     } catch (err) {
       set({ integrationStatus: 'error', integrationError: err instanceof Error ? err.message : 'Failed to save credentials' })
     }
@@ -204,10 +205,12 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
   },
 
   syncData: async () => {
-    const { dataSource, mappingConfig } = get()
+    const { integration, dataSource, mappingConfig, jiraMappingConfig } = get()
     set({ isLoading: true, error: null })
     try {
-      const data = await loadData(dataSource, mappingConfig)
+      const source = integration === 'jira' ? 'jira' : integration === 'linear' ? 'linear' : dataSource
+      const config = integration === 'jira' ? jiraMappingConfig : mappingConfig
+      const data = await loadData(source, config)
       set({
         items: data.items,
         groups: data.groups,
