@@ -1,9 +1,18 @@
 import type { RoadmapItem, Group, Category, ItemStatus, Priority, JiraMappingConfig } from '../types'
 import { deriveTimePeriod } from '../utils/timePeriod'
 
+export class JiraAuthError extends Error {
+  constructor(detail?: string) {
+    super(detail ? `Jira authentication failed — ${detail}` : 'Jira authentication failed')
+    this.name = 'JiraAuthError'
+  }
+}
+
 async function jiraFetch<T>(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<T> {
   const sessionId = localStorage.getItem('rr-session') ?? ''
-  const url = `/api/jira/${path}`
+  // Split path and query string — path goes as ?path=, rest as additional params
+  const [pathPart, queryPart] = path.split('?')
+  const url = `/api/jira-proxy?path=${encodeURIComponent(pathPart)}${queryPart ? `&${queryPart}` : ''}`
   const res = await fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json', 'X-RR-Session': sessionId },
@@ -11,9 +20,12 @@ async function jiraFetch<T>(path: string, method: 'GET' | 'POST' = 'GET', body?:
   })
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    const detail = body?.errorMessages?.[0] ?? body?.error ?? ''
-    console.error('Jira API error:', { status: res.status, url, body })
+    const respBody = await res.json().catch(() => ({}))
+    const detail = respBody?.errorMessages?.[0] ?? respBody?.error ?? respBody?.detail ?? ''
+    console.error('Jira API error:', { status: res.status, url, body: respBody })
+    if (res.status === 401 || res.status === 403) {
+      throw new JiraAuthError(detail)
+    }
     throw new Error(`Jira API error: ${res.status} (${path})${detail ? ` — ${detail}` : ''}`)
   }
 
@@ -44,6 +56,13 @@ function mapPriority(priorityName?: string): Priority {
 
 // ─── Jira Types ───────────────────────────────────────────────────────────────
 
+interface JiraFixVersion {
+  id: string
+  name: string
+  releaseDate?: string
+  released?: boolean
+}
+
 interface JiraIssue {
   id: string
   key: string
@@ -63,12 +82,21 @@ interface JiraIssue {
     labels: string[]
     components: { id: string; name: string }[]
     issuetype: { name: string }
-    parent?: { id: string; key: string }
+    // parent includes fields.summary and fields.issuetype for richer lookups
+    parent?: {
+      id: string
+      key: string
+      fields?: {
+        summary?: string
+        issuetype?: { name: string }
+      }
+    }
+    fixVersions: JiraFixVersion[]
   }
   self: string
 }
 
-interface JiraProject {
+export interface JiraProject {
   id: string
   key: string
   name: string
@@ -82,104 +110,260 @@ interface JiraComponent {
   description?: string
 }
 
+// ─── Initiative lookup ────────────────────────────────────────────────────────
+
+export interface EpicHierarchyInfo {
+  initiativeKey: string
+  initiativeName: string
+  incrementKey: string
+  incrementName: string
+}
+
+interface JiraIncrementIssue {
+  key: string
+  fields: {
+    summary: string
+    issuetype: { name: string }
+    parent?: {
+      key: string
+      fields?: { summary?: string; issuetype?: { name: string } }
+    }
+  }
+}
+
+/**
+ * Fetch ROAD Increment issues to resolve their parent Initiative and capture increment names.
+ * Hierarchy: Initiative → Increment → Epic (DTP) → Story
+ */
+async function fetchIncrementDetails(
+  incrementKeys: string[],
+): Promise<Map<string, { incrementName: string; initiativeKey: string }>> {
+  const map = new Map<string, { incrementName: string; initiativeKey: string }>()
+  if (incrementKeys.length === 0) return map
+
+  const chunks: string[][] = []
+  for (let i = 0; i < incrementKeys.length; i += 50) {
+    chunks.push(incrementKeys.slice(i, i + 50))
+  }
+
+  for (const chunk of chunks) {
+    const jql = `key in (${chunk.map((k) => `"${k}"`).join(',')})`
+    try {
+      const data = await jiraFetch<{ issues: JiraIncrementIssue[] }>(
+        `search/jql?jql=${encodeURIComponent(jql)}&maxResults=50&fields=${encodeURIComponent('summary,parent,issuetype')}`,
+      )
+      data.issues.forEach((issue) => {
+        const parentKey = issue.fields.parent?.key ?? issue.key
+        map.set(issue.key, { incrementName: issue.fields.summary, initiativeKey: parentKey })
+      })
+    } catch (err) {
+      console.error('Failed to fetch increment details:', err)
+    }
+  }
+
+  return map
+}
+
+/**
+ * Fetch Initiative issues by key to get their names.
+ */
+async function fetchInitiativeNames(initiativeKeys: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>()
+  if (initiativeKeys.length === 0) return map
+
+  const chunks: string[][] = []
+  for (let i = 0; i < initiativeKeys.length; i += 50) {
+    chunks.push(initiativeKeys.slice(i, i + 50))
+  }
+
+  for (const chunk of chunks) {
+    const jql = `key in (${chunk.map((k) => `"${k}"`).join(',')})`
+    try {
+      const data = await jiraFetch<{ issues: Array<{ key: string; fields: { summary: string } }> }>(
+        `search/jql?jql=${encodeURIComponent(jql)}&maxResults=50&fields=${encodeURIComponent('summary')}`,
+      )
+      data.issues.forEach((issue) => map.set(issue.key, issue.fields.summary))
+    } catch (err) {
+      console.error('Failed to fetch initiative names:', err)
+    }
+  }
+
+  return map
+}
+
+/**
+ * Build a map from epicKey → full hierarchy info.
+ * Goes two levels up: Epic → Increment (direct parent) → Initiative (increment's parent).
+ */
+async function buildEpicToHierarchyMap(issues: JiraIssue[]): Promise<Map<string, EpicHierarchyInfo>> {
+  // Step 1: Collect unique Increment keys from Epic parents
+  const epicToIncrementKey = new Map<string, string>()
+  issues.forEach((issue) => {
+    if (issue.fields.issuetype.name.toLowerCase() === 'epic' && issue.fields.parent?.key) {
+      epicToIncrementKey.set(issue.key, issue.fields.parent.key)
+    }
+  })
+
+  // Step 2: Fetch increment details (name + initiative key)
+  const incrementDetails = await fetchIncrementDetails([...new Set(epicToIncrementKey.values())])
+
+  // Step 3: Fetch initiative names
+  const initiativeKeys = new Set([...incrementDetails.values()].map((d) => d.initiativeKey))
+  const initiativeNames = await fetchInitiativeNames([...initiativeKeys])
+
+  // Step 4: Build Epic → full hierarchy
+  const map = new Map<string, EpicHierarchyInfo>()
+  issues.forEach((issue) => {
+    if (issue.fields.issuetype.name.toLowerCase() !== 'epic') return
+    const incrementKey = epicToIncrementKey.get(issue.key)
+    if (!incrementKey) return
+    const incDetail = incrementDetails.get(incrementKey)
+    if (!incDetail) return
+    map.set(issue.key, {
+      initiativeKey: incDetail.initiativeKey,
+      initiativeName: initiativeNames.get(incDetail.initiativeKey) ?? incDetail.initiativeKey,
+      incrementKey,
+      incrementName: incDetail.incrementName,
+    })
+  })
+
+  return map
+}
+
+// ─── Fix version → time period ────────────────────────────────────────────────
+
+function fixVersionTimePeriod(fixVersions: JiraFixVersion[]): { quarter: string; year: number; date: string } | null {
+  // Prefer the first fix version that has a release date
+  const fv = fixVersions.find((v) => v.releaseDate) ?? fixVersions[0]
+  if (!fv) return null
+  if (fv.releaseDate) {
+    const period = deriveTimePeriod(fv.releaseDate)
+    if (period) return { ...period, date: fv.releaseDate }
+  }
+  // Parse quarter from the version name itself, e.g. "DTP 2026.3.0.0 UAT" → Q3 2026
+  const match = fv.name.match(/(\d{4})\.(\d)/)
+  if (match) {
+    const year = parseInt(match[1])
+    const quarter = `Q${match[2]}`
+    return { quarter, year, date: '' }
+  }
+  return null
+}
+
 // ─── Fetch data ───────────────────────────────────────────────────────────────
+
+// Max issues to fetch — DTP has 2000+ so we cap at 500 most-recent
+const MAX_ISSUES = 500
 
 async function fetchAllIssues(productArea: string): Promise<JiraIssue[]> {
   const issues: JiraIssue[] = []
-  let startAt = 0
+  let nextPageToken: string | undefined = undefined
   const maxResults = 100
 
-  // Filter by product area
-  const jql = `"Product Area" = "${productArea}" ORDER BY created DESC`
-  const fields = 'summary,description,status,priority,duedate,created,updated,assignee,project,labels,components,issuetype,parent'
+  // Fetch recent issues updated in the last 2 years — avoids loading ancient backlog
+  const twoYearsAgo = new Date()
+  twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2)
+  const since = twoYearsAgo.toISOString().split('T')[0] // YYYY-MM-DD
 
+  const jql = `project = "${productArea}" AND updated >= "${since}" ORDER BY updated DESC`
+  // Include fixVersions and expanded parent (parent fields auto-included by Jira)
+  const fields = 'summary,description,status,priority,duedate,created,updated,assignee,project,labels,components,issuetype,parent,fixVersions'
+
+  // Jira Cloud REST API v3 /search/jql uses cursor-based pagination (nextPageToken + isLast)
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    // Use GET with query parameters for /search/jql endpoint
-    // Build query string manually to avoid + encoding (Jira needs %20 for spaces)
     const queryParts = [
       `jql=${encodeURIComponent(jql)}`,
-      `startAt=${startAt}`,
       `maxResults=${maxResults}`,
-      `fields=${encodeURIComponent(fields)}`
+      `fields=${encodeURIComponent(fields)}`,
     ]
-    const data = await jiraFetch<{ issues: JiraIssue[]; total: number; maxResults: number }>(
-      `search/jql?${queryParts.join('&')}`
+    if (nextPageToken) queryParts.push(`nextPageToken=${encodeURIComponent(nextPageToken)}`)
+
+    const data = await jiraFetch<{ issues: JiraIssue[]; nextPageToken?: string; isLast?: boolean }>(
+      `search/jql?${queryParts.join('&')}`,
     )
+
     issues.push(...data.issues)
-    startAt += data.maxResults
-    if (issues.length >= data.total) break
+
+    if (data.isLast || !data.nextPageToken || data.issues.length === 0 || issues.length >= MAX_ISSUES) break
+    nextPageToken = data.nextPageToken
   }
 
   return issues
 }
 
-async function fetchProjects(): Promise<JiraProject[]> {
+export async function fetchProjects(): Promise<JiraProject[]> {
   const data = await jiraFetch<JiraProject[]>('project')
   return data
-}
-
-export async function fetchProductAreas(): Promise<string[]> {
-  try {
-    // Simplified approach: fetch a small sample of issues and extract product area values
-    // Using minimal fields to avoid 431 error
-    const data = await jiraFetch<{ issues: Array<{ fields: Record<string, unknown> }> }>(
-      'search',
-      'POST',
-      {
-        jql: '',
-        startAt: 0,
-        maxResults: 50,
-        fields: ['customfield_*']
-      }
-    )
-
-    const productAreas = new Set<string>()
-
-    // Look through all custom fields to find product area values
-    data.issues.forEach(issue => {
-      Object.entries(issue.fields).forEach(([key, value]) => {
-        if (key.startsWith('customfield_')) {
-          // Check if this looks like a product area field
-          if (value && typeof value === 'object' && 'value' in value) {
-            const val = String(value.value)
-            // Only add if it looks like a product area (short string, caps)
-            if (val.length < 20 && /^[A-Z]/.test(val)) {
-              productAreas.add(val)
-            }
-          }
-        }
-      })
-    })
-
-    const areas = Array.from(productAreas).sort()
-    return areas.length > 0 ? areas : ['DTP', 'Platform', 'Mobile', 'Web', 'API']
-  } catch (error) {
-    console.error('Failed to fetch product areas:', error)
-    throw error
-  }
 }
 
 // ─── Normalize ────────────────────────────────────────────────────────────────
 
 function normalizeIssue(
   issue: JiraIssue,
-  config: JiraMappingConfig
+  config: JiraMappingConfig,
+  epicHierarchyMap: Map<string, EpicHierarchyInfo>,
+  epicSummaryMap: Map<string, string>,
 ): RoadmapItem {
-  const timeValue =
-    config.timeSource === 'createdAt' ? issue.fields.created :
-    config.timeSource === 'updatedAt' ? issue.fields.updated :
-    issue.fields.duedate ?? null
+  // ── Time placement ──
+  let timeDate: string | null = null
+  let quarter = ''
+  let year = 0
+  let dueDate = issue.fields.duedate ?? null
 
-  const period = deriveTimePeriod(timeValue)
+  if (config.timeSource === 'fixVersion') {
+    const fvPeriod = fixVersionTimePeriod(issue.fields.fixVersions ?? [])
+    if (fvPeriod) {
+      quarter = fvPeriod.quarter
+      year = fvPeriod.year
+      dueDate = fvPeriod.date || dueDate
+    }
+  } else {
+    timeDate =
+      config.timeSource === 'createdAt' ? issue.fields.created :
+      config.timeSource === 'updatedAt' ? issue.fields.updated :
+      issue.fields.duedate ?? null
+    const period = deriveTimePeriod(timeDate)
+    if (period) {
+      quarter = period.quarter
+      year = period.year
+    }
+  }
 
+  // ── Issue type flags ──
+  const isEpic = issue.fields.issuetype.name.toLowerCase() === 'epic'
+  const isInitiativeType = issue.fields.issuetype.name.toLowerCase() === 'initiative'
+
+  // ── Hierarchy fields ──
+  // For epics: use the hierarchy map directly.
+  // For stories/tasks: look through their parent epic.
+  const epicKey = isEpic ? issue.key : issue.fields.parent?.key
+  const hierarchy = epicKey ? epicHierarchyMap.get(epicKey) : undefined
+
+  const epicId = isEpic ? issue.key : (issue.fields.parent?.key ?? undefined)
+  const epicName = isEpic
+    ? issue.fields.summary
+    : (epicKey ? (epicSummaryMap.get(epicKey) ?? undefined) : undefined)
+  const incrementId = hierarchy?.incrementKey
+  const incrementName = hierarchy?.incrementName
+
+  // ── Group (swimlane row) ──
   const groupId = (() => {
+    if (config.groupBy === 'initiative') {
+      if (isInitiativeType) return issue.key
+      if (isEpic) return hierarchy?.initiativeKey ?? 'no-initiative'
+      // Story/Task: look up via parent epic
+      const parentKey = issue.fields.parent?.key
+      if (parentKey) {
+        const parentHier = epicHierarchyMap.get(parentKey)
+        if (parentHier) return parentHier.initiativeKey
+      }
+      return 'no-initiative'
+    }
     if (config.groupBy === 'epic') {
-      // If this issue has a parent, use parent's key as group
       const parentKey = issue.fields.parent?.key
       if (parentKey) return parentKey
-      // If this is an epic itself, use its own key
-      if (issue.fields.issuetype.name.toLowerCase() === 'epic') return issue.key
+      if (isEpic) return issue.key
       return 'no-epic'
     }
     if (config.groupBy === 'project') return issue.fields.project.id
@@ -194,6 +378,12 @@ function normalizeIssue(
     return []
   })()
 
+  // Build source URL from the self URL or fallback
+  const domain = issue.self.includes('atlassian.net') ? issue.self.split('/rest/')[0] : ''
+  const sourceUrl = domain
+    ? `${domain}/browse/${issue.key}`
+    : `https://jira.atlassian.net/browse/${issue.key}`
+
   return {
     id: issue.key,
     identifier: issue.key,
@@ -204,21 +394,23 @@ function normalizeIssue(
     groupId,
     categoryIds,
     personaIds: [],
-    quarter: period?.quarter ?? '',
-    year: period?.year ?? 0,
-    dueDate: issue.fields.duedate ?? null,
+    quarter,
+    year,
+    dueDate,
     assigneeId: issue.fields.assignee?.accountId ?? null,
     assigneeName: issue.fields.assignee?.displayName ?? null,
     teamId: issue.fields.project.id,
     teamName: issue.fields.project.name,
-    sourceUrl: issue.self.includes('atlassian.net')
-      ? `${issue.self.split('/rest/')[0]}/browse/${issue.key}`
-      : `https://jira.atlassian.net/browse/${issue.key}`,
+    sourceUrl,
     sourceId: issue.id,
-    sourceType: 'linear', // Keep as 'linear' for now since type is limited
+    sourceType: 'jira',
     parentId: issue.fields.parent?.id ?? null,
     createdAt: issue.fields.created,
     updatedAt: issue.fields.updated,
+    epicId,
+    epicName,
+    incrementId,
+    incrementName,
   }
 }
 
@@ -240,42 +432,63 @@ export async function fetchJiraData(config: JiraMappingConfig): Promise<JiraData
     fetchProjects(),
   ])
 
-  // Build epic map for grouping
-  const epics = new Map<string, string>()
+  // Build epic hierarchy map: epicKey → { initiativeKey, initiativeName, incrementKey, incrementName }
+  // Two extra round-trips: one to fetch increment details, one for initiative names.
+  const epicHierarchyMap = await buildEpicToHierarchyMap(rawIssues)
+
+  // Build a quick epicKey → summary map for use in story normalisation
+  const epicSummaryMap = new Map<string, string>()
   rawIssues.forEach((issue) => {
     if (issue.fields.issuetype.name.toLowerCase() === 'epic') {
-      epics.set(issue.key, issue.fields.summary)
+      epicSummaryMap.set(issue.key, issue.fields.summary)
     }
   })
 
-  // Build groups based on mapping config
+  // ── Build groups ──
   const groups: Group[] = (() => {
-    if (config.groupBy === 'epic') {
-      const epicGroups = Array.from(epics.entries()).map(([key, name], i) => ({
-        id: key,
+    if (config.groupBy === 'initiative') {
+      // Collect unique initiatives from the hierarchy map
+      const seen = new Map<string, { name: string; order: number }>()
+      let order = 0
+      epicHierarchyMap.forEach((hier) => {
+        if (!seen.has(hier.initiativeKey)) {
+          seen.set(hier.initiativeKey, { name: hier.initiativeName, order: order++ })
+        }
+      })
+      // Also pick up raw Initiative issue types that may not be in any epic's chain
+      rawIssues.forEach((issue) => {
+        if (issue.fields.issuetype.name.toLowerCase() === 'initiative' && !seen.has(issue.key)) {
+          seen.set(issue.key, { name: issue.fields.summary, order: order++ })
+        }
+      })
+      const result = Array.from(seen.entries()).map(([id, { name, order: o }]) => ({
+        id,
         name,
         description: null,
         color: '#6366f1',
-        order: i,
+        order: o,
       }))
-      // Add "no-epic" group for issues without epic
-      epicGroups.push({
-        id: 'no-epic',
-        name: 'No Epic',
-        description: null,
-        color: '#94a3b8',
-        order: epicGroups.length,
+      result.push({ id: 'no-initiative', name: 'No Initiative', description: null, color: '#94a3b8', order: order })
+      return result
+    }
+
+    if (config.groupBy === 'epic') {
+      const epics = new Map<string, string>()
+      rawIssues.forEach((issue) => {
+        if (issue.fields.issuetype.name.toLowerCase() === 'epic') {
+          epics.set(issue.key, issue.fields.summary)
+        }
       })
+      const epicGroups = Array.from(epics.entries()).map(([key, name], i) => ({
+        id: key, name, description: null, color: '#6366f1', order: i,
+      }))
+      epicGroups.push({ id: 'no-epic', name: 'No Epic', description: null, color: '#94a3b8', order: epicGroups.length })
       return epicGroups
     }
 
     if (config.groupBy === 'project') {
       return projects.map((p, i) => ({
-        id: p.id,
-        name: p.name,
-        description: p.description ?? null,
-        color: '#6366f1',
-        order: i,
+        id: p.id, name: p.name, description: p.description ?? null, color: '#6366f1', order: i,
       }))
     }
 
@@ -283,11 +496,7 @@ export async function fetchJiraData(config: JiraMappingConfig): Promise<JiraData
       const labelSet = new Set<string>()
       rawIssues.forEach((issue) => issue.fields.labels.forEach((l) => labelSet.add(l)))
       return Array.from(labelSet).map((label, i) => ({
-        id: label,
-        name: label,
-        description: null,
-        color: '#6366f1',
-        order: i,
+        id: label, name: label, description: null, color: '#6366f1', order: i,
       }))
     }
 
@@ -311,16 +520,12 @@ export async function fetchJiraData(config: JiraMappingConfig): Promise<JiraData
     return []
   })()
 
-  // Build categories
+  // ── Build categories ──
   const categories: Category[] = (() => {
     if (config.categorySource === 'label') {
       const labelSet = new Set<string>()
       rawIssues.forEach((issue) => issue.fields.labels.forEach((l) => labelSet.add(l)))
-      return Array.from(labelSet).map((label) => ({
-        id: label,
-        name: label,
-        color: '#6366f1',
-      }))
+      return Array.from(labelSet).map((label) => ({ id: label, name: label, color: '#6366f1' }))
     }
 
     if (config.categorySource === 'component') {
@@ -330,17 +535,13 @@ export async function fetchJiraData(config: JiraMappingConfig): Promise<JiraData
           if (!componentMap.has(c.id)) componentMap.set(c.id, c)
         })
       })
-      return Array.from(componentMap.values()).map((c) => ({
-        id: c.id,
-        name: c.name,
-        color: '#6366f1',
-      }))
+      return Array.from(componentMap.values()).map((c) => ({ id: c.id, name: c.name, color: '#6366f1' }))
     }
 
     return []
   })()
 
-  const items = rawIssues.map((issue) => normalizeIssue(issue, config))
+  const items = rawIssues.map((issue) => normalizeIssue(issue, config, epicHierarchyMap, epicSummaryMap))
 
   return { items, groups, categories }
 }

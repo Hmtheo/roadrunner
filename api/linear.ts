@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { Redis } from '@upstash/redis'
 import type { StoredSession } from './credentials'
+import { decrypt } from './encrypt'
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -18,11 +19,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(401).json({ error: 'Linear not configured for this session' })
   }
 
+  let linearKey: string
+  try {
+    linearKey = decrypt(session.linearKey)
+  } catch {
+    return res.status(500).json({ error: 'Failed to decrypt credentials' })
+  }
+
   const upstream = await fetch('https://api.linear.app/graphql', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': session.linearKey,
+      'Authorization': linearKey,
     },
     body: JSON.stringify(req.body),
   })
