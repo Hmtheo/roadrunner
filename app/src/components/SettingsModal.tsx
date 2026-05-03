@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import {
   X, Palette, LogOut, LogIn, Check, Sun, Moon,
-  Plug2, Zap, Link2, ChevronRight, CheckCircle2, AlertCircle, Loader2,
+  Plug2, Zap, Link2, ChevronRight, CheckCircle2, AlertCircle, Loader2, Search,
 } from 'lucide-react'
 import { useRoadRunnerStore } from '../store/useRoadRunnerStore'
+import type { JiraProject } from '../store/useRoadRunnerStore'
 import type { MappingConfig, JiraMappingConfig, Integration, IntegrationStatus, LinearCredentials, JiraCredentials } from '../types'
 
 type SettingsTab = 'design' | 'app-config' | 'linear-config' | 'jira-config' | 'account'
@@ -60,6 +61,7 @@ export function SettingsModal() {
     integration, integrationStatus, integrationError,
     linearCredentials, jiraCredentials, isLoading,
     connectLinear, connectJira, disconnectIntegration, syncData,
+    jiraProjects, jiraProjectsLoading, selectJiraProductArea,
   } = useRoadRunnerStore()
 
   const [activeTab, setActiveTab] = useState<SettingsTab>('design')
@@ -211,6 +213,10 @@ export function SettingsModal() {
                   connectJira={connectJira}
                   disconnectIntegration={disconnectIntegration}
                   syncData={syncData}
+                  jiraProjects={jiraProjects}
+                  jiraProjectsLoading={jiraProjectsLoading}
+                  selectedProductArea={jiraMappingConfig.productArea ?? ''}
+                  selectJiraProductArea={selectJiraProductArea}
                   onSubNav={(tab) => setActiveTab(tab)}
                   onShowTokenModal={() => setShowTokenModal(true)}
                 />
@@ -291,6 +297,10 @@ interface AppConfigPanelProps {
   connectJira: (domain: string, email: string, apiToken: string) => Promise<void>
   disconnectIntegration: () => void
   syncData: () => Promise<void>
+  jiraProjects: JiraProject[]
+  jiraProjectsLoading: boolean
+  selectedProductArea: string
+  selectJiraProductArea: (key: string) => Promise<void>
   onSubNav: (tab: SettingsTab) => void
   onShowTokenModal: () => void
 }
@@ -298,12 +308,14 @@ interface AppConfigPanelProps {
 function AppConfigPanel({
   integration, integrationStatus, integrationError,
   linearCredentials, jiraCredentials, isLoading,
-  connectLinear, connectJira, disconnectIntegration, syncData, onSubNav, onShowTokenModal,
+  connectLinear, connectJira, disconnectIntegration, syncData,
+  jiraProjects, jiraProjectsLoading, selectedProductArea, selectJiraProductArea,
+  onSubNav, onShowTokenModal,
 }: AppConfigPanelProps) {
   const [selected, setSelected] = useState<'linear' | 'jira' | null>(integration)
   const [linearKey, setLinearKey] = useState('')
-  const [jiraDomain, setJiraDomain] = useState('')
-  const [jiraEmail, setJiraEmail] = useState('')
+  const [jiraDomain, setJiraDomain] = useState('dayforce.atlassian.net')
+  const [jiraEmail, setJiraEmail] = useState('hugh.theodore@dayforce.com')
   const [jiraToken, setJiraToken] = useState('')
 
   const isConnecting = integrationStatus === 'connecting'
@@ -326,8 +338,8 @@ function AppConfigPanel({
     disconnectIntegration()
     setSelected(null)
     setLinearKey('')
-    setJiraDomain('')
-    setJiraEmail('')
+    setJiraDomain('dayforce.atlassian.net')
+    setJiraEmail('hugh.theodore@dayforce.com')
     setJiraToken('')
   }
 
@@ -392,47 +404,60 @@ function AppConfigPanel({
 
       {/* Connected state */}
       {isConnected && (
-        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 size={16} className="text-emerald-400 flex-shrink-0" />
-            <p className="text-sm font-medium text-emerald-300">
-              Connected to {integration === 'linear' ? 'Linear' : 'Jira'}
-            </p>
+        <div className="space-y-3">
+          <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={16} className="text-emerald-400 flex-shrink-0" />
+              <p className="text-sm font-medium text-emerald-300">
+                Connected to {integration === 'linear' ? 'Linear' : 'Jira'}
+              </p>
+            </div>
+            {integration === 'linear' && linearCredentials && (
+              <p className="text-xs text-zinc-500 font-mono truncate">
+                Key: {linearCredentials.apiKey.slice(0, 12)}••••••••
+              </p>
+            )}
+            {integration === 'jira' && jiraCredentials && (
+              <p className="text-xs text-zinc-500">
+                {jiraCredentials.email} · {jiraCredentials.domain}
+              </p>
+            )}
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                onClick={() => onSubNav(integration === 'linear' ? 'linear-config' : 'jira-config')}
+                className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+              >
+                Configure field mapping →
+              </button>
+              <span className="text-zinc-700">·</span>
+              <button
+                onClick={syncData}
+                disabled={isLoading || !selectedProductArea}
+                className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 disabled:opacity-50 transition-colors"
+              >
+                {isLoading ? <Loader2 size={11} className="animate-spin" /> : null}
+                {isLoading ? 'Syncing…' : 'Sync now'}
+              </button>
+              <span className="text-zinc-700">·</span>
+              <button
+                onClick={handleDisconnect}
+                className="text-xs text-red-400 hover:text-red-300 transition-colors"
+              >
+                Disconnect
+              </button>
+            </div>
           </div>
-          {integration === 'linear' && linearCredentials && (
-            <p className="text-xs text-zinc-500 font-mono truncate">
-              Key: {linearCredentials.apiKey.slice(0, 12)}••••••••
-            </p>
+
+          {/* Product area picker — shown for Jira only */}
+          {integration === 'jira' && (
+            <JiraProjectPicker
+              projects={jiraProjects}
+              loading={jiraProjectsLoading}
+              selected={selectedProductArea}
+              onSelect={selectJiraProductArea}
+              isSyncing={isLoading}
+            />
           )}
-          {integration === 'jira' && jiraCredentials && (
-            <p className="text-xs text-zinc-500">
-              {jiraCredentials.email} · {jiraCredentials.domain}
-            </p>
-          )}
-          <div className="flex items-center gap-3 pt-1">
-            <button
-              onClick={() => onSubNav(integration === 'linear' ? 'linear-config' : 'jira-config')}
-              className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-            >
-              Configure field mapping →
-            </button>
-            <span className="text-zinc-700">·</span>
-            <button
-              onClick={syncData}
-              disabled={isLoading}
-              className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 disabled:opacity-50 transition-colors"
-            >
-              {isLoading ? <Loader2 size={11} className="animate-spin" /> : null}
-              {isLoading ? 'Syncing…' : 'Sync now'}
-            </button>
-            <span className="text-zinc-700">·</span>
-            <button
-              onClick={handleDisconnect}
-              className="text-xs text-red-400 hover:text-red-300 transition-colors"
-            >
-              Disconnect
-            </button>
-          </div>
         </div>
       )}
 
@@ -527,6 +552,92 @@ function AppConfigPanel({
 
       {!isConnected && !selected && (
         <p className="text-xs text-zinc-600 text-center py-2">Select an integration above to get started.</p>
+      )}
+    </div>
+  )
+}
+
+// ─── Jira Project Picker ───────────────────────────────────────────────────────
+
+function JiraProjectPicker({
+  projects, loading, selected, onSelect, isSyncing,
+}: {
+  projects: JiraProject[]
+  loading: boolean
+  selected: string
+  onSelect: (key: string) => Promise<void>
+  isSyncing: boolean
+}) {
+  const [query, setQuery] = useState('')
+
+  const filtered = query.trim()
+    ? projects.filter((p) =>
+        p.key.toLowerCase().includes(query.toLowerCase()) ||
+        p.name.toLowerCase().includes(query.toLowerCase())
+      )
+    : projects
+
+  return (
+    <div className="rounded-lg border border-zinc-700/50 overflow-hidden">
+      <div className="px-4 py-3 bg-zinc-800/60 border-b border-zinc-700/50 flex items-center justify-between">
+        <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Select Product Area</p>
+        {selected && (
+          <span className="text-xs text-emerald-400 font-mono font-medium">{selected} active</span>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-6 text-zinc-500 text-xs">
+          <Loader2 size={13} className="animate-spin" /> Loading projects…
+        </div>
+      ) : projects.length === 0 ? (
+        <div className="py-6 text-center text-xs text-zinc-600">No projects found</div>
+      ) : (
+        <>
+          <div className="px-3 py-2 border-b border-zinc-700/40">
+            <div className="flex items-center gap-2 bg-zinc-800 border border-zinc-700 rounded-md px-3 py-1.5">
+              <Search size={12} className="text-zinc-500 flex-shrink-0" />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={`Search ${projects.length} projects…`}
+                className="flex-1 bg-transparent text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none"
+              />
+            </div>
+          </div>
+          <div className="max-h-52 overflow-y-auto divide-y divide-zinc-700/30">
+            {filtered.length === 0 ? (
+              <div className="py-4 text-center text-xs text-zinc-600">No matches for "{query}"</div>
+            ) : (
+              filtered.map((p) => {
+                const isActive = p.key === selected
+                return (
+                  <button
+                    key={p.key}
+                    onClick={() => !isSyncing && onSelect(p.key)}
+                    disabled={isSyncing}
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left text-xs transition-colors disabled:cursor-wait ${
+                      isActive
+                        ? 'bg-indigo-600/15 text-indigo-300'
+                        : 'text-zinc-300 hover:bg-zinc-800/60 hover:text-zinc-100'
+                    }`}
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="font-mono font-semibold text-zinc-400 w-20 flex-shrink-0">{p.key}</span>
+                      <span className="truncate">{p.name}</span>
+                    </span>
+                    {isActive && (
+                      isSyncing
+                        ? <Loader2 size={11} className="animate-spin text-indigo-400 flex-shrink-0" />
+                        : <CheckCircle2 size={13} className="text-indigo-400 flex-shrink-0" />
+                    )}
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </>
       )}
     </div>
   )
@@ -643,6 +754,7 @@ function JiraConfigPanel({ mappingConfig, setMappingConfig }: {
               onChange={(e) => setMappingConfig({ groupBy: e.target.value as JiraMappingConfig['groupBy'] })}
               className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:border-indigo-500"
             >
+              <option value="initiative">Issue → Initiative</option>
               <option value="epic">Issue → Epic</option>
               <option value="project">Issue → Project</option>
               <option value="label">Issue → Label</option>
@@ -659,6 +771,7 @@ function JiraConfigPanel({ mappingConfig, setMappingConfig }: {
               onChange={(e) => setMappingConfig({ timeSource: e.target.value as JiraMappingConfig['timeSource'] })}
               className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:border-indigo-500"
             >
+              <option value="fixVersion">Issue → Fix Version (Increment)</option>
               <option value="dueDate">Issue → Due Date</option>
               <option value="sprintEnd">Issue → Sprint End Date</option>
               <option value="createdAt">Issue → Created Date</option>

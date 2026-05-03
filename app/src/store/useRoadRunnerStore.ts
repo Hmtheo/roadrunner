@@ -6,6 +6,7 @@ import type {
 import { MOCK_ITEMS, MOCK_GROUPS, MOCK_CATEGORIES, MOCK_PERSONAS } from '../data/mockData'
 import { applyFilters } from '../utils/filterEngine'
 import { loadData } from '../services/dataService'
+import { JiraAuthError, fetchProjects as fetchJiraProjectsApi } from '../services/jiraAdapter'
 
 const DEFAULT_FILTERS: FilterState = {
   groups: [],
@@ -19,6 +20,12 @@ const DEFAULT_FILTERS: FilterState = {
   search: '',
 }
 
+export interface JiraProject {
+  id: string
+  key: string
+  name: string
+}
+
 interface RoadRunnerStore {
   // Data
   items: RoadmapItem[]
@@ -28,6 +35,7 @@ interface RoadRunnerStore {
 
   // UI state
   timelineView: 'quarterly' | 'annual'
+  cardGranularity: 'increment' | 'epic'
   density: 'expanded' | 'condensed'
   theme: 'dark' | 'light'
   filters: FilterState
@@ -50,6 +58,10 @@ interface RoadRunnerStore {
   linearCredentials: LinearCredentials | null
   jiraCredentials: JiraCredentials | null
 
+  // Jira projects (populated after connect, before product area selection)
+  jiraProjects: JiraProject[]
+  jiraProjectsLoading: boolean
+
   // Saved views
   savedViews: SavedView[]
   currentViewId: string | null
@@ -59,6 +71,7 @@ interface RoadRunnerStore {
 
   // Actions
   setTimelineView: (view: 'quarterly' | 'annual') => void
+  setCardGranularity: (granularity: 'increment' | 'epic') => void
   setDensity: (density: 'expanded' | 'condensed') => void
   setTheme: (theme: 'dark' | 'light') => void
   setFilters: (filters: Partial<FilterState>) => void
@@ -69,8 +82,10 @@ interface RoadRunnerStore {
   setDataSource: (source: 'linear' | 'demo') => void
   setMappingConfig: (config: Partial<MappingConfig>) => void
   setJiraMappingConfig: (config: Partial<JiraMappingConfig>) => void
+  selectJiraProductArea: (projectKey: string) => Promise<void>
   connectLinear: (apiKey: string) => Promise<void>
   connectJira: (domain: string, email: string, apiToken: string) => Promise<void>
+  fetchJiraProjects: () => Promise<void>
   disconnectIntegration: () => void
   syncData: () => Promise<void>
   saveView: (name: string, description?: string) => void
@@ -85,6 +100,7 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
   personas: MOCK_PERSONAS,
 
   timelineView: 'quarterly',
+  cardGranularity: 'increment',
   density: 'expanded',
   theme: (localStorage.getItem('rr-theme') as 'dark' | 'light') ?? 'dark',
   filters: DEFAULT_FILTERS,
@@ -94,7 +110,7 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
 
   dataSource: 'demo',
   mappingConfig: { groupBy: 'project', categorySource: 'label', timeSource: 'dueDate', teamFilter: null, showIdentifier: false, showAssignee: false, showTeam: false },
-  jiraMappingConfig: { productArea: 'DTP', groupBy: 'epic', categorySource: 'label', timeSource: 'dueDate', showKey: false, showAssignee: false, showSprint: false, showStoryPoints: false },
+  jiraMappingConfig: { productArea: 'DTP', groupBy: 'initiative', categorySource: 'label', timeSource: 'fixVersion', showKey: false, showAssignee: false, showSprint: false, showStoryPoints: false },
   isLoading: false,
   lastSyncedAt: null,
   error: null,
@@ -107,6 +123,9 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
     ? { domain: '', email: '', apiToken: '••••••••' }
     : null,
 
+  jiraProjects: [],
+  jiraProjectsLoading: false,
+
   savedViews: [],
   currentViewId: null,
 
@@ -115,6 +134,7 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
   },
 
   setTimelineView: (view) => set({ timelineView: view }),
+  setCardGranularity: (granularity) => set({ cardGranularity: granularity }),
   setDensity: (density) => set({ density }),
   setTheme: (theme) => {
     localStorage.setItem('rr-theme', theme)
@@ -149,6 +169,11 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
 
   setJiraMappingConfig: (config) =>
     set((state) => ({ jiraMappingConfig: { ...state.jiraMappingConfig, ...config } })),
+
+  selectJiraProductArea: async (projectKey) => {
+    set((state) => ({ jiraMappingConfig: { ...state.jiraMappingConfig, productArea: projectKey } }))
+    await get().syncData()
+  },
 
   connectLinear: async (apiKey) => {
     set({ integrationStatus: 'connecting', integrationError: null })
@@ -188,10 +213,32 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
       const { sessionId } = await res.json()
       localStorage.setItem('rr-session', sessionId)
       localStorage.setItem('rr-integration', 'jira')
-      set({ integration: 'jira', integrationStatus: 'connected', integrationError: null, jiraCredentials: { domain: normalizedDomain, email, apiToken: '••••••••' } })
-      // Don't auto-sync - wait for user to select product area
+      set({
+        integration: 'jira',
+        integrationStatus: 'connected',
+        integrationError: null,
+        jiraCredentials: { domain: normalizedDomain, email, apiToken: '••••••••' },
+        // Reset product area selection so user picks one for the new connection
+        jiraMappingConfig: { ...get().jiraMappingConfig, productArea: '' },
+        items: [],
+        groups: [],
+        categories: [],
+      })
+      // Load projects list — user will pick one, which triggers the full sync
+      await get().fetchJiraProjects()
     } catch (err) {
       set({ integrationStatus: 'error', integrationError: err instanceof Error ? err.message : 'Failed to save credentials' })
+    }
+  },
+
+  fetchJiraProjects: async () => {
+    set({ jiraProjectsLoading: true })
+    try {
+      const projects = await fetchJiraProjectsApi()
+      set({ jiraProjects: projects.map((p) => ({ id: p.id, key: p.key, name: p.name })), jiraProjectsLoading: false })
+    } catch (err) {
+      console.error('Failed to fetch Jira projects:', err)
+      set({ jiraProjectsLoading: false })
     }
   },
 
@@ -201,7 +248,19 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
       fetch('/api/credentials', { method: 'DELETE', headers: { 'X-RR-Session': sessionId } }).catch(() => {})
     }
     ['rr-session', 'rr-integration'].forEach((k) => localStorage.removeItem(k))
-    set({ integration: null, integrationStatus: 'idle', integrationError: null, linearCredentials: null, jiraCredentials: null, dataSource: 'demo' })
+    set({
+      integration: null,
+      integrationStatus: 'idle',
+      integrationError: null,
+      linearCredentials: null,
+      jiraCredentials: null,
+      dataSource: 'demo',
+      jiraProjects: [],
+      jiraProjectsLoading: false,
+      items: MOCK_ITEMS,
+      groups: MOCK_GROUPS,
+      categories: MOCK_CATEGORIES,
+    })
   },
 
   syncData: async () => {
@@ -215,15 +274,31 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
         items: data.items,
         groups: data.groups,
         categories: data.categories,
+        dataSource: integration === 'linear' ? 'linear' : 'demo',
         filters: DEFAULT_FILTERS,
         isLoading: false,
         lastSyncedAt: new Date().toISOString(),
       })
     } catch (err) {
-      set({
-        error: err instanceof Error ? err.message : 'Failed to load data',
-        isLoading: false,
-      })
+      if (err instanceof JiraAuthError) {
+        // Session is invalid/expired — clear it and return to disconnected state
+        ;['rr-session', 'rr-integration'].forEach((k) => localStorage.removeItem(k))
+        set({
+          integration: null,
+          integrationStatus: 'idle',
+          integrationError: 'Your Jira session expired. Please reconnect.',
+          jiraCredentials: null,
+          linearCredentials: null,
+          dataSource: 'demo',
+          error: null,
+          isLoading: false,
+        })
+      } else {
+        set({
+          error: err instanceof Error ? err.message : 'Failed to load data',
+          isLoading: false,
+        })
+      }
     }
   },
 

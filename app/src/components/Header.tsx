@@ -5,12 +5,16 @@ import { countActiveFilters } from '../utils/filterEngine'
 export function Header() {
   const {
     timelineView, setTimelineView,
+    cardGranularity, setCardGranularity,
     density, setDensity,
     filters, toggleFilterDrawer,
     toggleSettings,
-    dataSource, isLoading, lastSyncedAt, error,
+    integration, isLoading, lastSyncedAt, error,
     syncData,
   } = useRoadRunnerStore()
+
+  const sourceLabel = integration === 'jira' ? 'Jira' : integration === 'linear' ? 'Linear' : 'Demo'
+  const sourceDot = integration ? 'bg-emerald-400' : 'bg-amber-400'
 
   const activeFilterCount = countActiveFilters(filters)
 
@@ -31,13 +35,13 @@ export function Header() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            <span className={`w-2 h-2 rounded-full ${dataSource === 'linear' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-            <span className="text-xs text-zinc-400">{dataSource === 'linear' ? 'Linear' : 'Demo'}</span>
+            <span className={`w-2 h-2 rounded-full ${sourceDot}`} />
+            <span className="text-xs text-zinc-400">{sourceLabel}</span>
             {syncLabel && <span className="text-xs text-zinc-600">· {syncLabel}</span>}
           </div>
         </div>
 
-        {/* Center — timeline toggle + refresh */}
+        {/* Center — timeline toggle + granularity toggle + refresh */}
         <div className="flex items-center gap-2">
           <div className="flex bg-zinc-800 border border-zinc-700 rounded-lg p-0.5 gap-0.5">
             {(['quarterly', 'annual'] as const).map((view) => (
@@ -55,11 +59,29 @@ export function Header() {
             ))}
           </div>
 
+          {integration === 'jira' && (
+            <div className="flex bg-zinc-800 border border-zinc-700 rounded-lg p-0.5 gap-0.5">
+              {(['increment', 'epic'] as const).map((g) => (
+                <button
+                  key={g}
+                  onClick={() => setCardGranularity(g)}
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors capitalize ${
+                    cardGranularity === g
+                      ? 'bg-zinc-600 text-zinc-100'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          )}
+
           <button
             onClick={syncData}
             disabled={isLoading}
             className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors disabled:opacity-50"
-            title={dataSource === 'linear' ? 'Refresh from Linear' : 'Reload demo data'}
+            title={integration ? `Refresh from ${sourceLabel}` : 'Reload demo data'}
           >
             <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
           </button>

@@ -8,10 +8,21 @@ import { ItemDetailModal } from './components/ItemDetailModal'
 import { SettingsModal } from './components/SettingsModal'
 
 export default function App() {
-  const { groups, categories, selectedItemId, selectItem, syncData } = useRoadRunnerStore()
+  const { groups, categories, selectedItemId, selectItem, syncData, integration, fetchJiraProjects } = useRoadRunnerStore()
 
   useEffect(() => {
-    syncData()
+    if (integration === 'jira') {
+      // On startup with an existing Jira session: load projects list first,
+      // then sync data if a product area is already selected
+      fetchJiraProjects().then(() => {
+        const { jiraMappingConfig } = useRoadRunnerStore.getState()
+        if (jiraMappingConfig.productArea) {
+          syncData()
+        }
+      })
+    } else {
+      syncData()
+    }
   }, [])
 
   useEffect(() => {

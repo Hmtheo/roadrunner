@@ -15,13 +15,21 @@ export interface JiraCredentials {
 
 export interface JiraMappingConfig {
   productArea: string | null
-  groupBy: 'epic' | 'project' | 'label' | 'assignee'
+  groupBy: 'initiative' | 'epic' | 'project' | 'label' | 'assignee'
   categorySource: 'label' | 'component' | 'none'
-  timeSource: 'dueDate' | 'createdAt' | 'updatedAt' | 'sprintEnd'
+  timeSource: 'fixVersion' | 'dueDate' | 'createdAt' | 'updatedAt' | 'sprintEnd'
   showKey: boolean
   showAssignee: boolean
   showSprint: boolean
   showStoryPoints: boolean
+}
+
+export interface AggregatedCard {
+  id: string
+  name: string
+  count: number
+  status: ItemStatus
+  sourceUrl?: string
 }
 
 export interface RoadmapItem {
@@ -43,10 +51,15 @@ export interface RoadmapItem {
   teamName: string | null
   sourceUrl: string
   sourceId: string
-  sourceType: 'linear'
+  sourceType: 'linear' | 'jira'
   parentId: string | null
   createdAt: string
   updatedAt: string
+  // Jira hierarchy — optional, not set for Linear/demo items
+  epicId?: string
+  epicName?: string
+  incrementId?: string
+  incrementName?: string
 }
 
 export interface Persona {
