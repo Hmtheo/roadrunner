@@ -1,10 +1,16 @@
 {
   "name": "roadrunner",
   "private": true,
+  "scripts": {
+    "dev": "node dev-server.mjs & cd app && npm run dev",
+    "dev:api": "node dev-server.mjs",
+    "dev:app": "cd app && npm run dev"
+  },
   "dependencies": {
     "@upstash/redis": "^1.34.9"
   },
   "devDependencies": {
-    "@vercel/node": "^3.0.0"
+    "@vercel/node": "^3.0.0",
+    "vercel": "^53.1.1"
   }
 }

@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useRef, useEffect } from 'react'
 import type { Group, Category, RoadmapItem, ItemStatus, AggregatedCard } from '../types'
 import { useRoadRunnerStore } from '../store/useRoadRunnerStore'
 import { applyFilters } from '../utils/filterEngine'
@@ -68,6 +68,18 @@ export function TimelineGrid({ groups, categories }: TimelineGridProps) {
 
   const visibleItems = useMemo(() => applyFilters(items, filters), [items, filters])
 
+  // Derive the column key for the current period so we can scroll to it
+  const currentPeriodKey = useMemo(() => {
+    const now = new Date()
+    const month = now.getMonth() + 1
+    const q = month <= 3 ? 'Q1' : month <= 6 ? 'Q2' : month <= 9 ? 'Q3' : 'Q4'
+    const y = now.getFullYear()
+    return timelineView === 'quarterly' ? getColumnKey(q, y) : String(y)
+  }, [timelineView])
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const currentColRef = useRef<HTMLTableCellElement>(null)
+
   const { columns, columnKeys } = useMemo(() => {
     const keySet = new Set<string>()
     visibleItems.forEach((item) => {
@@ -89,6 +101,17 @@ export function TimelineGrid({ groups, categories }: TimelineGridProps) {
     })
     return { columns: cols, columnKeys: sorted }
   }, [visibleItems, timelineView])
+
+  // Scroll so the current period column is flush with the left edge (after the group label column).
+  // Must be declared after `columns` to avoid a temporal dead zone reference error.
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    const col = currentColRef.current
+    if (!container || !col) return
+    const containerRect = container.getBoundingClientRect()
+    const colRect = col.getBoundingClientRect()
+    container.scrollLeft += colRect.left - containerRect.left - 192 // 192px = w-48 group col
+  }, [columns])
 
   const hasUnscheduled = visibleItems.some((item) => !item.dueDate || !item.quarter)
 
@@ -119,7 +142,7 @@ export function TimelineGrid({ groups, categories }: TimelineGridProps) {
   }
 
   return (
-    <div className="flex-1 overflow-auto">
+    <div ref={scrollContainerRef} className="flex-1 overflow-auto">
       <table className="border-collapse min-w-full">
         <thead>
           <tr className="bg-zinc-900/80 sticky top-0 z-10">
@@ -142,8 +165,13 @@ export function TimelineGrid({ groups, categories }: TimelineGridProps) {
             {columns.map((col) => (
               <th
                 key={col.key}
+                ref={col.key === currentPeriodKey ? currentColRef : undefined}
                 style={{ minWidth: minColWidth }}
-                className="text-left text-xs font-semibold text-zinc-400 uppercase tracking-wider border-b border-r border-zinc-700/50 px-4 py-3"
+                className={`text-left text-xs font-semibold uppercase tracking-wider border-b border-r border-zinc-700/50 px-4 py-3 ${
+                  col.key === currentPeriodKey
+                    ? 'text-indigo-400'
+                    : 'text-zinc-400'
+                }`}
               >
                 {col.label}
               </th>

@@ -52,14 +52,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ sessionId })
     }
 
-    const session: StoredSession = {
-      integration,
-      linearKey: linearKey ? encrypt(linearKey) : undefined,
-      jiraDomain: jiraDomain ? encrypt(jiraDomain) : undefined,
-      jiraEmail: jiraEmail ? encrypt(jiraEmail) : undefined,
-      jiraToken: jiraToken ? encrypt(jiraToken) : undefined,
+    let session: StoredSession
+    try {
+      session = {
+        integration,
+        linearKey: linearKey ? encrypt(linearKey) : undefined,
+        jiraDomain: jiraDomain ? encrypt(jiraDomain) : undefined,
+        jiraEmail: jiraEmail ? encrypt(jiraEmail) : undefined,
+        jiraToken: jiraToken ? encrypt(jiraToken) : undefined,
+      }
+    } catch (err) {
+      console.error('Credential encryption failed:', err)
+      return res.status(500).json({ error: 'Failed to encrypt credentials — check CREDENTIALS_ENCRYPTION_KEY env var' })
     }
-    await redis.set(redisKey, session, { ex: TTL_SECONDS })
+
+    try {
+      await redis.set(redisKey, session, { ex: TTL_SECONDS })
+    } catch (err) {
+      console.error('Redis write failed:', err)
+      return res.status(502).json({ error: 'Failed to store credentials — Redis unavailable' })
+    }
 
     return res.status(201).json({ sessionId })
   }
