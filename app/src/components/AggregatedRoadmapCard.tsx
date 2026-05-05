@@ -44,11 +44,9 @@ export function AggregatedRoadmapCard({ card, itemLabel = 'epic' }: AggregatedRo
       </p>
 
       <div className="flex items-center justify-between">
-        <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${statusStyle.badge}`}>
-          {statusStyle.label}
-        </span>
+        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${statusStyle.dot}`} title={statusStyle.label} />
         <span className="text-xs text-zinc-400 bg-zinc-700/60 rounded-full px-2 py-0.5 font-medium">
-          {card.count} {card.count === 1 ? itemLabel : `${itemLabel}s`}
+          {card.count} {card.count === 1 ? itemLabel : itemLabel === 'story' ? 'stories' : `${itemLabel}s`}
         </span>
       </div>
     </div>

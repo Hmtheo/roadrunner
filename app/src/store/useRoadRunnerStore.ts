@@ -18,6 +18,7 @@ const DEFAULT_FILTERS: FilterState = {
   priorities: [],
   assignees: [],
   search: '',
+  hidePastPeriods: true,
 }
 
 export interface JiraProject {
@@ -110,7 +111,13 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
 
   dataSource: 'demo',
   mappingConfig: { groupBy: 'project', categorySource: 'label', timeSource: 'dueDate', teamFilter: null, showIdentifier: false, showAssignee: false, showTeam: false },
-  jiraMappingConfig: { productArea: 'DTP', groupBy: 'initiative', categorySource: 'label', timeSource: 'fixVersion', showKey: false, showAssignee: false, showSprint: false, showStoryPoints: false },
+  jiraMappingConfig: (() => {
+    const saved = localStorage.getItem('rr-jira-config')
+    if (saved) {
+      try { return JSON.parse(saved) } catch { /* fall through */ }
+    }
+    return { productArea: '', groupBy: 'initiative', categorySource: 'label', timeSource: 'fixVersion', showKey: false, showAssignee: false, showSprint: false, showStoryPoints: false }
+  })(),
   isLoading: false,
   lastSyncedAt: null,
   error: null,
@@ -168,10 +175,18 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
     set((state) => ({ mappingConfig: { ...state.mappingConfig, ...config } })),
 
   setJiraMappingConfig: (config) =>
-    set((state) => ({ jiraMappingConfig: { ...state.jiraMappingConfig, ...config } })),
+    set((state) => {
+      const updated = { ...state.jiraMappingConfig, ...config }
+      localStorage.setItem('rr-jira-config', JSON.stringify(updated))
+      return { jiraMappingConfig: updated }
+    }),
 
   selectJiraProductArea: async (projectKey) => {
-    set((state) => ({ jiraMappingConfig: { ...state.jiraMappingConfig, productArea: projectKey } }))
+    set((state) => {
+      const updated = { ...state.jiraMappingConfig, productArea: projectKey }
+      localStorage.setItem('rr-jira-config', JSON.stringify(updated))
+      return { jiraMappingConfig: updated }
+    })
     await get().syncData()
   },
 
@@ -213,13 +228,15 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
       const { sessionId } = await res.json()
       localStorage.setItem('rr-session', sessionId)
       localStorage.setItem('rr-integration', 'jira')
+      // Reset product area so user must pick one for the new connection
+      const freshConfig = { ...get().jiraMappingConfig, productArea: '' }
+      localStorage.setItem('rr-jira-config', JSON.stringify(freshConfig))
       set({
         integration: 'jira',
         integrationStatus: 'connected',
         integrationError: null,
         jiraCredentials: { domain: normalizedDomain, email, apiToken: '••••••••' },
-        // Reset product area selection so user picks one for the new connection
-        jiraMappingConfig: { ...get().jiraMappingConfig, productArea: '' },
+        jiraMappingConfig: freshConfig,
         items: [],
         groups: [],
         categories: [],
@@ -247,7 +264,7 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
     if (sessionId) {
       fetch('/api/credentials', { method: 'DELETE', headers: { 'X-RR-Session': sessionId } }).catch(() => {})
     }
-    ['rr-session', 'rr-integration'].forEach((k) => localStorage.removeItem(k))
+    ;['rr-session', 'rr-integration', 'rr-jira-config'].forEach((k) => localStorage.removeItem(k))
     set({
       integration: null,
       integrationStatus: 'idle',
@@ -282,7 +299,7 @@ export const useRoadRunnerStore = create<RoadRunnerStore>((set, get) => ({
     } catch (err) {
       if (err instanceof JiraAuthError) {
         // Session is invalid/expired — clear it and return to disconnected state
-        ;['rr-session', 'rr-integration'].forEach((k) => localStorage.removeItem(k))
+        ;['rr-session', 'rr-integration', 'rr-jira-config'].forEach((k) => localStorage.removeItem(k))
         set({
           integration: null,
           integrationStatus: 'idle',

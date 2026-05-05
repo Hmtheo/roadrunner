@@ -100,11 +100,14 @@ export interface FilterState {
   categories: string[]
   personas: string[]
   quarters: string[]
+  /** Past years to reveal (only used when hidePastPeriods is true) */
   years: number[]
   statuses: ItemStatus[]
   priorities: Priority[]
   assignees: string[]
   search: string
+  /** When true, items from years before the current year are hidden unless the year is in `years` */
+  hidePastPeriods: boolean
 }
 
 export interface SavedView {

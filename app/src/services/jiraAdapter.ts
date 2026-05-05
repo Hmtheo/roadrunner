@@ -192,42 +192,98 @@ async function fetchInitiativeNames(initiativeKeys: string[]): Promise<Map<strin
 }
 
 /**
- * Build a map from epicKey → full hierarchy info.
- * Goes two levels up: Epic → Increment (direct parent) → Initiative (increment's parent).
+ * Fetch ALL issues from the hierarchy project (e.g. ROAD) that holds Initiatives + Increments.
+ * The project key is derived from the parent key of any epic (e.g. "ROAD-123" → "ROAD").
+ * Returns empty array if no hierarchy project can be determined.
  */
-async function buildEpicToHierarchyMap(issues: JiraIssue[]): Promise<Map<string, EpicHierarchyInfo>> {
-  // Step 1: Collect unique Increment keys from Epic parents
-  const epicToIncrementKey = new Map<string, string>()
-  issues.forEach((issue) => {
-    if (issue.fields.issuetype.name.toLowerCase() === 'epic' && issue.fields.parent?.key) {
-      epicToIncrementKey.set(issue.key, issue.fields.parent.key)
+async function fetchAllHierarchyIssues(epics: JiraIssue[]): Promise<JiraIncrementIssue[]> {
+  // Determine hierarchy project from any epic's parent key
+  const anyParentKey = epics.find((e) => e.fields.parent?.key)?.fields.parent?.key
+  if (!anyParentKey) return []
+  const hierarchyProjectKey = anyParentKey.split('-')[0]
+
+  const all: JiraIncrementIssue[] = []
+  let nextPageToken: string | undefined = undefined
+
+  const jql = `project = "${hierarchyProjectKey}" ORDER BY created ASC`
+  const fields = 'summary,issuetype,parent'
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const queryParts = [
+      `jql=${encodeURIComponent(jql)}`,
+      `maxResults=100`,
+      `fields=${encodeURIComponent(fields)}`,
+    ]
+    if (nextPageToken) queryParts.push(`nextPageToken=${encodeURIComponent(nextPageToken)}`)
+
+    try {
+      const data = await jiraFetch<{ issues: JiraIncrementIssue[]; nextPageToken?: string; isLast?: boolean }>(
+        `search/jql?${queryParts.join('&')}`,
+      )
+      all.push(...data.issues)
+      if (data.isLast || !data.nextPageToken || data.issues.length === 0) break
+      nextPageToken = data.nextPageToken
+    } catch (err) {
+      console.error('Failed to fetch hierarchy project issues:', err)
+      break
+    }
+  }
+
+  return all
+}
+
+export interface HierarchyMaps {
+  /** epicKey → full hierarchy info */
+  epicToHierarchy: Map<string, EpicHierarchyInfo>
+  /** incrementKey → { name, initiativeKey } — ALL increments in the hierarchy project */
+  allIncrements: Map<string, { name: string; initiativeKey: string }>
+  /** initiativeKey → name — ALL initiatives in the hierarchy project */
+  allInitiatives: Map<string, string>
+}
+
+/**
+ * Build complete hierarchy maps.
+ * Fetches ALL initiatives + increments from the ROAD-style project,
+ * then maps each epic to its full chain.
+ */
+async function buildHierarchyMaps(epics: JiraIssue[]): Promise<HierarchyMaps> {
+  const hierarchyIssues = await fetchAllHierarchyIssues(epics)
+
+  const allIncrements = new Map<string, { name: string; initiativeKey: string }>()
+  const allInitiatives = new Map<string, string>()
+
+  hierarchyIssues.forEach((issue) => {
+    const typeName = issue.fields.issuetype.name.toLowerCase()
+    const hasParent = !!issue.fields.parent?.key
+    if (hasParent && !typeName.includes('initiative')) {
+      // Has a parent → it's an Increment
+      allIncrements.set(issue.key, {
+        name: issue.fields.summary,
+        initiativeKey: issue.fields.parent!.key,
+      })
+    } else if (!hasParent || typeName.includes('initiative')) {
+      // No parent or explicitly named initiative → it's an Initiative
+      allInitiatives.set(issue.key, issue.fields.summary)
     }
   })
 
-  // Step 2: Fetch increment details (name + initiative key)
-  const incrementDetails = await fetchIncrementDetails([...new Set(epicToIncrementKey.values())])
-
-  // Step 3: Fetch initiative names
-  const initiativeKeys = new Set([...incrementDetails.values()].map((d) => d.initiativeKey))
-  const initiativeNames = await fetchInitiativeNames([...initiativeKeys])
-
-  // Step 4: Build Epic → full hierarchy
-  const map = new Map<string, EpicHierarchyInfo>()
-  issues.forEach((issue) => {
-    if (issue.fields.issuetype.name.toLowerCase() !== 'epic') return
-    const incrementKey = epicToIncrementKey.get(issue.key)
+  // Build Epic → full hierarchy
+  const epicToHierarchy = new Map<string, EpicHierarchyInfo>()
+  epics.forEach((epic) => {
+    const incrementKey = epic.fields.parent?.key
     if (!incrementKey) return
-    const incDetail = incrementDetails.get(incrementKey)
-    if (!incDetail) return
-    map.set(issue.key, {
-      initiativeKey: incDetail.initiativeKey,
-      initiativeName: initiativeNames.get(incDetail.initiativeKey) ?? incDetail.initiativeKey,
+    const inc = allIncrements.get(incrementKey)
+    if (!inc) return
+    epicToHierarchy.set(epic.key, {
+      initiativeKey: inc.initiativeKey,
+      initiativeName: allInitiatives.get(inc.initiativeKey) ?? inc.initiativeKey,
       incrementKey,
-      incrementName: incDetail.incrementName,
+      incrementName: inc.name,
     })
   })
 
-  return map
+  return { epicToHierarchy, allIncrements, allInitiatives }
 }
 
 // ─── Fix version → time period ────────────────────────────────────────────────
@@ -252,24 +308,20 @@ function fixVersionTimePeriod(fixVersions: JiraFixVersion[]): { quarter: string;
 
 // ─── Fetch data ───────────────────────────────────────────────────────────────
 
-// Max issues to fetch — DTP has 2000+ so we cap at 500 most-recent
-const MAX_ISSUES = 500
-
-async function fetchAllIssues(productArea: string): Promise<JiraIssue[]> {
-  const issues: JiraIssue[] = []
+/**
+ * Fetch ALL epics for a product area — no date filter, no hard cap.
+ * Epics are the natural roadmap unit: they carry fixVersions for time placement
+ * and there are typically hundreds (not thousands) per project.
+ * Stories/tasks are excluded — they're implementation detail, not roadmap items.
+ */
+async function fetchAllEpics(productArea: string): Promise<JiraIssue[]> {
+  const epics: JiraIssue[] = []
   let nextPageToken: string | undefined = undefined
   const maxResults = 100
 
-  // Fetch recent issues updated in the last 2 years — avoids loading ancient backlog
-  const twoYearsAgo = new Date()
-  twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2)
-  const since = twoYearsAgo.toISOString().split('T')[0] // YYYY-MM-DD
-
-  const jql = `project = "${productArea}" AND updated >= "${since}" ORDER BY updated DESC`
-  // Include fixVersions and expanded parent (parent fields auto-included by Jira)
+  const jql = `project = "${productArea}" AND issuetype = Epic ORDER BY created ASC`
   const fields = 'summary,description,status,priority,duedate,created,updated,assignee,project,labels,components,issuetype,parent,fixVersions'
 
-  // Jira Cloud REST API v3 /search/jql uses cursor-based pagination (nextPageToken + isLast)
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const queryParts = [
@@ -283,13 +335,13 @@ async function fetchAllIssues(productArea: string): Promise<JiraIssue[]> {
       `search/jql?${queryParts.join('&')}`,
     )
 
-    issues.push(...data.issues)
+    epics.push(...data.issues)
 
-    if (data.isLast || !data.nextPageToken || data.issues.length === 0 || issues.length >= MAX_ISSUES) break
+    if (data.isLast || !data.nextPageToken || data.issues.length === 0) break
     nextPageToken = data.nextPageToken
   }
 
-  return issues
+  return epics
 }
 
 export async function fetchProjects(): Promise<JiraProject[]> {
@@ -428,59 +480,35 @@ export async function fetchJiraData(config: JiraMappingConfig): Promise<JiraData
   }
 
   const [rawIssues, projects] = await Promise.all([
-    fetchAllIssues(config.productArea),
+    fetchAllEpics(config.productArea),
     fetchProjects(),
   ])
 
-  // Build epic hierarchy map: epicKey → { initiativeKey, initiativeName, incrementKey, incrementName }
-  // Two extra round-trips: one to fetch increment details, one for initiative names.
-  const epicHierarchyMap = await buildEpicToHierarchyMap(rawIssues)
+  // Build complete hierarchy maps: all initiatives, all increments, and epic→hierarchy chains
+  const { epicToHierarchy: epicHierarchyMap, allInitiatives, allIncrements } = await buildHierarchyMaps(rawIssues)
 
-  // Build a quick epicKey → summary map for use in story normalisation
+  // All rawIssues are epics — build summary map for normalisation
   const epicSummaryMap = new Map<string, string>()
-  rawIssues.forEach((issue) => {
-    if (issue.fields.issuetype.name.toLowerCase() === 'epic') {
-      epicSummaryMap.set(issue.key, issue.fields.summary)
-    }
-  })
+  rawIssues.forEach((issue) => epicSummaryMap.set(issue.key, issue.fields.summary))
 
   // ── Build groups ──
   const groups: Group[] = (() => {
     if (config.groupBy === 'initiative') {
-      // Collect unique initiatives from the hierarchy map
-      const seen = new Map<string, { name: string; order: number }>()
+      // Use the COMPLETE initiative set — includes initiatives with no epics yet
+      const result: Group[] = []
       let order = 0
-      epicHierarchyMap.forEach((hier) => {
-        if (!seen.has(hier.initiativeKey)) {
-          seen.set(hier.initiativeKey, { name: hier.initiativeName, order: order++ })
-        }
+      allInitiatives.forEach((name, key) => {
+        result.push({ id: key, name, description: null, color: '#6366f1', order: order++ })
       })
-      // Also pick up raw Initiative issue types that may not be in any epic's chain
-      rawIssues.forEach((issue) => {
-        if (issue.fields.issuetype.name.toLowerCase() === 'initiative' && !seen.has(issue.key)) {
-          seen.set(issue.key, { name: issue.fields.summary, order: order++ })
-        }
-      })
-      const result = Array.from(seen.entries()).map(([id, { name, order: o }]) => ({
-        id,
-        name,
-        description: null,
-        color: '#6366f1',
-        order: o,
-      }))
+      // Fallback bucket for epics that couldn't be resolved to any initiative
       result.push({ id: 'no-initiative', name: 'No Initiative', description: null, color: '#94a3b8', order: order })
       return result
     }
 
     if (config.groupBy === 'epic') {
-      const epics = new Map<string, string>()
-      rawIssues.forEach((issue) => {
-        if (issue.fields.issuetype.name.toLowerCase() === 'epic') {
-          epics.set(issue.key, issue.fields.summary)
-        }
-      })
-      const epicGroups = Array.from(epics.entries()).map(([key, name], i) => ({
-        id: key, name, description: null, color: '#6366f1', order: i,
+      // All rawIssues are epics — map them directly
+      const epicGroups = rawIssues.map((issue, i) => ({
+        id: issue.key, name: issue.fields.summary, description: null, color: '#6366f1', order: i,
       }))
       epicGroups.push({ id: 'no-epic', name: 'No Epic', description: null, color: '#94a3b8', order: epicGroups.length })
       return epicGroups

@@ -17,6 +17,8 @@ const PRIORITY_LABELS: Record<Priority, string> = {
 
 const QUARTERS = ['Q1', 'Q2', 'Q3', 'Q4']
 
+const CURRENT_YEAR = new Date().getFullYear()
+
 export function FilterDrawer() {
   const {
     isFilterDrawerOpen, toggleFilterDrawer,
@@ -27,7 +29,8 @@ export function FilterDrawer() {
 
   const activeCount = countActiveFilters(filters)
 
-  const availableYears = [...new Set(items.map((i) => i.year).filter(Boolean))].sort()
+  const allYears = [...new Set(items.map((i) => i.year).filter(Boolean))].sort() as number[]
+  const pastYears = allYears.filter((y) => y < CURRENT_YEAR)
 
   const toggleArray = useCallback(<T,>(
     arr: T[],
@@ -225,27 +228,50 @@ export function FilterDrawer() {
             </div>
           </section>
 
-          {/* Year */}
-          <section>
-            <label className="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-              Year
-            </label>
-            <div className="flex flex-wrap gap-1.5">
-              {availableYears.map((y) => (
-                <button
-                  key={y}
-                  onClick={() => toggleArray(filters.years, y, 'years')}
-                  className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-                    filters.years.includes(y)
-                      ? 'bg-indigo-600 border-indigo-500 text-white'
-                      : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {y}
-                </button>
-              ))}
-            </div>
-          </section>
+          {/* Past years */}
+          {pastYears.length > 0 && (
+            <section>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+                  Past years
+                </label>
+                <span className="text-xs text-zinc-600">hidden by default</span>
+              </div>
+
+              {filters.hidePastPeriods ? (
+                <div className="space-y-1.5">
+                  {pastYears.map((y) => (
+                    <label key={y} className="flex items-center gap-2.5 cursor-pointer group">
+                      <input
+                        type="checkbox"
+                        checked={filters.years.includes(y)}
+                        onChange={() => toggleArray(filters.years, y, 'years')}
+                        className="rounded border-zinc-600 bg-zinc-800 text-indigo-500 focus:ring-indigo-500"
+                      />
+                      <span className="text-sm text-zinc-300 group-hover:text-zinc-100">{y}</span>
+                    </label>
+                  ))}
+                  <button
+                    onClick={() => setFilters({ hidePastPeriods: false, years: [] })}
+                    className="mt-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                  >
+                    Show all past years
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between bg-zinc-800/60 border border-zinc-700/50 rounded-lg px-3 py-2">
+                  <span className="text-xs text-zinc-300">All past years visible</span>
+                  <button
+                    onClick={() => setFilters({ hidePastPeriods: true, years: [] })}
+                    className="text-xs text-zinc-500 hover:text-zinc-200 transition-colors"
+                    title="Hide past years again"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
         </div>
       </div>
     </>
